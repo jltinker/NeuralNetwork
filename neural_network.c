@@ -36,9 +36,9 @@ float SumDOW[NumHidden+1];
 float DeltaO[NumOutput+1];
 float DeltaH[NumLayers+1][NumHidden+1];
 float Hidden[NumLayers+1][NumTrain+1][NumHidden+1] ;
-float WeightIH[NumLayers+1][NumInput+1][NumHidden+1] ;
+float WeightIH[NumLayers+1][NumHidden+1][NumHidden+1] ; //assuming NumHidden>=NumInput
 float WeightHO[NumHidden+1][NumOutput+1] ;
-float DeltaWeightIH[NumLayers+1][NumInput+1][NumHidden+1];
+float DeltaWeightIH[NumLayers+1][NumHidden+1][NumHidden+1]; // assuming NumHidden>=NumInput
 float DeltaWeightHO[NumHidden+1][NumOutput+1];
 float Target[NumTrain+1][NumOutput+1]; // training value of wp
 float TargetError[NumTrain+1][NumOutput+1]; // training value of wp

@@ -2,8 +2,8 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
-//
 #include <time.h>
+#include <omp.h>
 #include "cutil.h"
 //#include "nrutil.h"
 
@@ -23,7 +23,7 @@
 
 #define NumLayers 4
 #define NumTrain 2000
-#define    NumHidden 16 
+#define    NumHidden 128 
 #define    NumOutput 1
 #define    NumInput 8
 
@@ -36,12 +36,14 @@ float SumDOW[NumHidden+1];
 float DeltaO[NumOutput+1];
 float DeltaH[NumLayers+1][NumHidden+1];
 float Hidden[NumLayers+1][NumTrain+1][NumHidden+1] ;
-float WeightIH[NumLayers+1][NumInput+1][NumHidden+1] ;
+float WeightIH[NumLayers+1][NumHidden+1][NumHidden+1] ; //assuming NumHidden>=NumInput
 float WeightHO[NumHidden+1][NumOutput+1] ;
-float DeltaWeightIH[NumLayers+1][NumInput+1][NumHidden+1];
+float DeltaWeightIH[NumLayers+1][NumHidden+1][NumHidden+1]; // assuming NumHidden>=NumInput
 float DeltaWeightHO[NumHidden+1][NumOutput+1];
 float Target[NumTrain+1][NumOutput+1]; // training value of wp
 float TargetError[NumTrain+1][NumOutput+1]; // training value of wp
+double second(void);
+double timediff(double t0,double t1);
 
 
 /* local functions
@@ -53,11 +55,20 @@ int initialize_weights();
 
 int main(int argc, char **argv)
 {
+  int irank, nrank;
   if(argc<2)
     {
       fprintf(stderr,"./ANN target_filename param_filename > out\n");
       exit(0);
     }
+
+#pragma omp parallel private(irank,nrank)
+      {
+	nrank=omp_get_num_threads();
+	irank=omp_get_thread_num();
+	fprintf(stderr,"OMP: %d %d\n",nrank,irank);
+      }
+
 
   input_training_data(argv[1], argv[2]);
   initialize_weights();
@@ -183,16 +194,19 @@ float activation_derivative(float x)
 
 int network_train()
 {
-  float eta=0.002, alpha=0.001;
-  int n,i,p,k,j,niter=0, ip, prand[NumTrain+1];
+  float eta=0.002, alpha=0.001, ctime1, ctime2, TempSum[NumHidden+1],x=0;
+  int n,i,p,k,j,niter=0, ip, prand[NumTrain+1], irank, nrank;
+  float xWeightIH[NumLayers+1][NumHidden+1][NumHidden+1] ; //assuming NumHidden>=NumInput
+  float xDeltaWeightIH[NumLayers+1][NumHidden+1][NumHidden+1]; // assuming NumHidden>=NumInput
 
   float Error;
 
   Error = 10*NumTrain;
+    ctime1 = second();
   while (Error>.0) {
 
     // get random list of training sample (use bootstrap method)
-    for(i=1;i<=NumTrain;++i)
+    for(i=1;i<=-NumTrain;++i)
       prand[i] = (int)(drand48()*NumTrain) + 1;
 
   Error = 0.0 ;
@@ -201,8 +215,15 @@ int network_train()
     //p = prand[ip];
     p = ip;
 
+
     for(n = 1; n<= NumLayers; ++n) {
-      for( j = 1 ; j <= NumHidden ; j++ ) {         /* compute hidden unit activations */
+
+#pragma omp parallel private(j,i,irank,nrank)
+      {
+	irank=omp_get_thread_num();
+	nrank=omp_get_num_threads();
+
+      for( j = irank+1 ; j <= NumHidden ; j+=nrank ) {         /* compute hidden unit activations */
         SumH[n][p][j] = WeightIH[n][0][j] ;
         for( i = 1 ; i <= NumHidden ; i++ ) {
 	  if(n==1 && i<=NumInput) 
@@ -213,6 +234,8 @@ int network_train()
         Hidden[n][p][j] = activation_function(SumH[n][p][j]);
 	//printf("%d %d %e %e\n",n,j,SumH[n][p][j],Hidden[n][p][j]);
       }
+#pragma omp barrier
+      } //ending the multithreaded loop 
     }
 
     for( k = 1 ; k <= NumOutput ; k++ ) {         /* compute output unit activations and errors */
@@ -246,24 +269,78 @@ int network_train()
 
     /* back-propagate between the hidden layers
      */
+    /*
     for(n=NumLayers-1; n>=1 ; --n ) {
-      for( j = 1 ; j <= NumHidden ; j++ ) {         /* 'back-propagate' errors to hidden layer */
-	SumDOW[j] = 0.0 ;
-	for( k = 1 ; k <= NumHidden ; k++ ) {
-	  SumDOW[j] += WeightIH[n+1][j][k] * DeltaH[n+1][k] ;
+#pragma omp parallel private(j,k,irank,nrank,TempSum)
+      {
+	irank=omp_get_thread_num();
+	nrank=omp_get_num_threads();
+	
+	for( j = irank+1; j <= NumHidden ; j+=nrank ) {         
+	  SumDOW[j] = 0.0 ;
+	  for( k = 1 ; k <= NumHidden ; k++ ) {
+	    SumDOW[j] += WeightIH[n+1][j][k] * DeltaH[n+1][k] ;
+	  }
+	  DeltaH[n][j] = SumDOW[j] * activation_derivative(SumH[n][p][j]) ;
+	  //if(p>=1)printf("DeltaH %d %e %e %e\n",j,DeltaH[n][j],
+	  //	       activation_derivative(SumH[n][p][j]),SumH[n][p][j]);
 	}
-	DeltaH[n][j] = SumDOW[j] * activation_derivative(SumH[n][p][j]) ;
-	//if(p>=1)printf("DeltaH %d %e %e %e\n",j,DeltaH[n][j],
-	//	       activation_derivative(SumH[n][p][j]),SumH[n][p][j]);
-      }
+#pragma omp barrier
+      } // end omp loop
+    }
+    //exit(0);
+    */
+
+    /* back-propagate between the hidden layers
+     */
+    for(n=NumLayers-1; n>=1 ; --n ) {
+      for( j = 1; j <= NumHidden ; j++ ) {         /* 'back-propagate' errors to hidden layer */
+	  SumDOW[j] = 0.0 ;
+	  for( k = 1 ; k <= NumHidden ; k++ ) {
+	    SumDOW[j] += WeightIH[n+1][j][k] * DeltaH[n+1][k] ;
+	  }
+	  DeltaH[n][j] = SumDOW[j] * activation_derivative(SumH[n][p][j]) ;
+	  //if(p>=1)printf("DeltaH %d %e %e %e\n",j,DeltaH[n][j],
+	  //	       activation_derivative(SumH[n][p][j]),SumH[n][p][j]);
+	}
     }
     //exit(0);
 
     
     /* Update the weights in the hidden layers
      */
+    
     for(n=1;n<=NumLayers;++n){
-      for( j = 1 ; j <= NumHidden ; j++ ) {         /* update weights WeightIH */
+#pragma omp parallel private(j,k,i,irank,nrank,xWeightIH,xDeltaWeightIH) shared(WeightIH)
+      {
+	irank=omp_get_thread_num();
+	nrank=omp_get_num_threads();
+
+      for( j = irank+1 ; j <= NumHidden ; j+=nrank ) {         
+	//if(irank==3)fprintf(stderr,"%d %d\n",n,j);
+        xDeltaWeightIH[n][0][j] = eta * DeltaH[n][j] + alpha * DeltaWeightIH[n][0][j] ;
+        xWeightIH[n][0][j] += DeltaWeightIH[n][0][j] ;
+	
+        for( i = 1 ; i <= NumHidden ; i++ ) {
+	  
+	  if(n==1 && i<=NumInput) 
+	    xDeltaWeightIH[n][i][j] = eta * Input[p][i] * DeltaH[n][j] + alpha * DeltaWeightIH[n][i][j];
+	  else
+	    xDeltaWeightIH[n][i][j] = eta * Hidden[n-1][p][i] * DeltaH[n][j] + alpha * DeltaWeightIH[n][i][j];
+	  
+	  xWeightIH[n][i][j] += DeltaWeightIH[n][i][j] ;
+	  //if(n==2)
+	  //printf("%d %d %d %e %e\n",n,i,j,WeightIH[n][i][j],DeltaWeightIH[n][i][j] );
+        }
+	
+      }
+#pragma omp barrier
+      }
+    }
+    
+    /*
+    for(n=1;n<=NumLayers;++n){
+      for( j = 1 ; j <= NumHidden ; j++ ) {         
         DeltaWeightIH[n][0][j] = eta * DeltaH[n][j] + alpha * DeltaWeightIH[n][0][j] ;
         WeightIH[n][0][j] += DeltaWeightIH[n][0][j] ;
         for( i = 1 ; i <= NumHidden ; i++ ) {
@@ -277,6 +354,7 @@ int network_train()
         }
       }
     }
+    */
     //      exit(0);
 
     /* Update the weights in the output layer
@@ -299,7 +377,9 @@ int network_train()
   //if(niter==1000)exit(0);
   ++niter;
   if(niter%1000 == 1 || niter<1000) { 
-    printf("Iter: %d Error: %e %f\n",niter,Error,Error);
+    ctime2 = second();
+    printf("Iter: %d Error: %e %f %.2f\n",niter,Error,Error,timediff(ctime1,ctime2));
+    ctime1 = ctime2;
     fflush(stdout);
   }
   if(Error<0.01)
